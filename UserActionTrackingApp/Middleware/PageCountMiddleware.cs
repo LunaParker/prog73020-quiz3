@@ -21,9 +21,15 @@ public class PageCountMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        TrackSessionCount(context);
-        await _next(context); // Let the action execute first
-        TrackControllerAction(context);
+        // Register before next() to execute before response starts
+        context.Response.OnStarting(() => 
+        {
+            TrackSessionCount(context);
+            TrackControllerAction(context);
+            return Task.CompletedTask;
+        });
+
+        await _next(context);
     }
 
     private void TrackSessionCount(HttpContext context)
@@ -123,9 +129,16 @@ public class PageCountMiddleware
 
     private Dictionary<string, string> GetCookieDictionary(HttpContext context)
     {
+        // If a cookie exists already for the given visitor...
         if (context.Request.Cookies.TryGetValue(CookieName, out var cookieValue))
         {
-            return JsonConvert.DeserializeObject<Dictionary<string, string>>(cookieValue, _jsonSettings);
+            // Then we'll try to deserialize it back into a dictionary - however, it might
+            // be null
+            Dictionary<string, string> deserializedCookie = JsonConvert.DeserializeObject<Dictionary<string, string>>(cookieValue, _jsonSettings);
+            
+            // If it's null, we'll return an empty dictionary, otherwise, we'll return
+            // a dictionary with the deserialized value
+            return deserializedCookie ?? new Dictionary<string, string>();
         }
         
         return new Dictionary<string, string>();
@@ -135,11 +148,29 @@ public class PageCountMiddleware
         HttpContext context,
         Dictionary<string, string> cookieDict)
     {
+        // First, delete the existing cookie
+        context.Response.Cookies.Delete(CookieName, new CookieOptions
+        {
+            Path = "/",
+            SameSite = SameSiteMode.Lax,
+            IsEssential = true
+        });
+        
+        // Then, serialize the dictionary into a JSON format (which can be easily
+        // saved as a string, which is the format cookies use)
         var serialized = JsonConvert.SerializeObject(cookieDict, _jsonSettings);
+        
+        // Finally, save the new cookie with the updated JSON string
         context.Response.Cookies.Append(
             CookieName,
             serialized,
-            new CookieOptions { Expires = DateTime.Now.AddYears(2) }
+            new CookieOptions
+            {
+                Expires = DateTime.Now.AddYears(2),
+                Path = "/",
+                SameSite = SameSiteMode.Lax,
+                IsEssential = true
+            }
         );
     }
 }
