@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.AspNetCore.Mvc.Controllers;
+using Microsoft.VisualBasic.CompilerServices;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 
@@ -34,10 +35,9 @@ public class PageCountMiddleware
 
     private void TrackSessionCount(HttpContext context)
     {
-        if (!context.Session.TryGetValue("CurrentSessionTracked", out _))
+        if (context.Session.Get("CurrentSessionTracked") == null)
         {
-            UpdateCookieValue(context, "SessionCount", current => current + 1);
-            ResetSessionActions(context);
+            IncrementCookieValue(context, "totalSessions");
             context.Session.Set("CurrentSessionTracked", Encoding.UTF8.GetBytes("true"));
         }
     }
@@ -51,12 +51,47 @@ public class PageCountMiddleware
         {
             var actionName = $"{actionDescriptor.ControllerName}/{actionDescriptor.ActionName}";
 
-            // Update total actions
-            UpdateActionCount(context, "TotalActions", actionName);
-
             // Update session actions
-            UpdateActionCount(context, "SessionActions", actionName);
+            TrackSessionActions(context, actionName);
+            
+            // Update total actions
+            UpdateActionCount(context, "totalActions", actionName);
         }
+    }
+
+    private Dictionary<string, string> GetSessionActions(HttpContext context)
+    {
+        if(context.Session.Get("sessionActions") != null)
+        {
+            // Deserialize the session actions dictionary
+            return JsonConvert.DeserializeObject<Dictionary<string, string>>(
+                context.Session.Get("sessionActions").ToString(),
+                _jsonSettings
+            ) ?? new Dictionary<string, string>();
+        }
+        
+        return new Dictionary<string, string>();
+    }
+
+    private void TrackSessionActions(HttpContext context, string key)
+    {
+        var sessionActions = GetSessionActions(context);
+
+        if (sessionActions.TryGetValue(key, out var currentValue))
+        {
+            // Convert the string and value of the session action into the corresponding key-value pair
+            sessionActions[key] = (currentValue + 1).ToString();
+        }
+        else
+        {
+            sessionActions[key] = 1.ToString();
+        }
+        
+        // Serialize the session actions dictionary
+        var serializedSessionActions = JsonConvert.SerializeObject(sessionActions, _jsonSettings);
+        
+        // Save the session actions dictionary back to the session
+        context.Session.Set("sessionActions", Encoding.UTF8.GetBytes(serializedSessionActions));
     }
 
     private void UpdateActionCount(
@@ -66,89 +101,90 @@ public class PageCountMiddleware
     {
         var actionDict = GetActionDictionary(context, actionType);
 
-        if (actionDict.ContainsKey(actionName))
+        if (actionDict.TryGetValue(actionName, out var actionValues))
         {
-            actionDict[actionName]++;
+            int currentControllerValue = int.Parse(actionDict[actionName]) + 1;
+            actionDict[actionName] = currentControllerValue.ToString();
         }
         else
         {
-            actionDict[actionName] = 1;
+            int currentControllerValue = 1;
+            actionDict[actionName] = currentControllerValue.ToString();
         }
 
         SaveActionDictionary(context, actionType, actionDict);
     }
 
-    private Dictionary<string, int> GetActionDictionary(
+    private Dictionary<string, string> GetActionDictionary(
         HttpContext context,
         string actionType)
     {
         var cookieDict = GetCookieDictionary(context);
 
-        if (cookieDict.TryGetValue(actionType, out var json))
+        if (cookieDict.TryGetValue(actionType, out var actionValue))
         {
-            return JsonConvert.DeserializeObject<Dictionary<string, int>>(json)
-                   ?? new Dictionary<string, int>();
+            // Return the key for the given action type subdictionary
+            return JsonConvert.DeserializeObject<Dictionary<string, string>>(actionValue, _jsonSettings) ?? new Dictionary<string, string>();
         }
 
-        return new Dictionary<string, int>();
+        return new Dictionary<string, string>();
     }
 
     private void SaveActionDictionary(
         HttpContext context,
         string actionType,
-        Dictionary<string, int> actionDict)
+        Dictionary<string, string> actionDict)
     {
-        var cookieDict = GetCookieDictionary(context);
-        cookieDict[actionType] = JsonConvert.SerializeObject(actionDict);
-        SaveCookie(context, cookieDict);
+        var actionSerialized = JsonConvert.SerializeObject(actionDict);
+        UpdateCookie(context, actionType, actionSerialized);
     }
 
-    private void ResetSessionActions(HttpContext context)
-    {
-        var cookieDict = GetCookieDictionary(context);
-        cookieDict["SessionActions"] = "{}";
-        SaveCookie(context, cookieDict);
-    }
-
-    private void UpdateCookieValue(
+    private void IncrementCookieValue(
         HttpContext context,
-        string key,
-        Func<int, int> updateFn)
+        string key)
     {
         var cookieDict = GetCookieDictionary(context);
-        int currentValue = 0;
+        int currentValue = 1;
 
-        if (cookieDict.ContainsKey(key))
+        if (cookieDict.TryGetValue(key, out var value))
         {
-            currentValue = int.Parse(cookieDict[key]);
+            currentValue = int.Parse(value) + 1;
         }
 
-        cookieDict[key] = updateFn(currentValue).ToString();
-        SaveCookie(context, cookieDict);
+        string newValue = currentValue.ToString();
+        UpdateCookie(context, key, newValue);
     }
 
     private Dictionary<string, string> GetCookieDictionary(HttpContext context)
     {
         // If a cookie exists already for the given visitor...
-        if (context.Request.Cookies.TryGetValue(CookieName, out var cookieValue))
+        if (context.Request.Cookies.TryGetValue(CookieName, out _))
         {
             // Then we'll try to deserialize it back into a dictionary - however, it might
             // be null
-            Dictionary<string, string> deserializedCookie = JsonConvert.DeserializeObject<Dictionary<string, string>>(cookieValue, _jsonSettings);
-            
-            // If it's null, we'll return an empty dictionary, otherwise, we'll return
-            // a dictionary with the deserialized value
-            return deserializedCookie ?? new Dictionary<string, string>();
+            return JsonConvert.DeserializeObject<Dictionary<string, string>>(context.Request.Cookies[CookieName], _jsonSettings) ?? new Dictionary<string, string>();
         }
         
         return new Dictionary<string, string>();
     }
 
+    private void UpdateCookie(HttpContext context, string key, string value)
+    {
+        // First we get the original cookie values
+        var mergedExistingAndNewCookies = GetCookieDictionary(context);
+        
+        // Next we update the value for the given key
+        mergedExistingAndNewCookies[key] = value;
+        
+        // Finally, we save the cookie with the new dictionary
+        SaveCookie(context, mergedExistingAndNewCookies);
+    }
+    
     private void SaveCookie(
         HttpContext context,
         Dictionary<string, string> cookieDict)
     {
-        // First, delete the existing cookie
+        // We can now delete the existing cookie
         context.Response.Cookies.Delete(CookieName, new CookieOptions
         {
             Path = "/",
@@ -172,5 +208,19 @@ public class PageCountMiddleware
                 IsEssential = true
             }
         );
+    }
+
+    public int? GetActionCount(HttpContext context, string pageName)
+    {
+        var actionDictionary = GetActionDictionary(context, "totalActions");
+
+        if (actionDictionary.TryGetValue(pageName, out var numberOfVisits))
+        {
+            return int.Parse(actionDictionary[pageName]);
+        }
+        else
+        {
+            return null;
+        }
     }
 }
